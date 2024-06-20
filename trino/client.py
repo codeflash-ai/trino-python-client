@@ -46,6 +46,10 @@ from dataclasses import dataclass
 from time import sleep
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+import requests
+
+from trino import constants
+from trino._version import __version__
 from trino.mapper import RowMapper, RowMapperFactory
 
 try:
@@ -71,7 +75,7 @@ if SOCKS_PROXY:
 else:
     PROXIES = {}
 
-_HEADER_EXTRA_CREDENTIAL_KEY_REGEX = re.compile(r'^\S[^\s=]*$')
+_HEADER_EXTRA_CREDENTIAL_KEY_REGEX = re.compile(r"^\S[^\s=]*$")
 
 ROLE_PATTERN = re.compile(r"^ROLE\{(.*)\}$")
 
@@ -232,10 +236,12 @@ class ClientSession(object):
             is_legacy_role_pattern = ROLE_PATTERN.match(role) is not None
             if role in ("NONE", "ALL") or is_legacy_role_pattern:
                 if is_legacy_role_pattern:
-                    warnings.warn(f"A role '{role}' is provided using a legacy format. "
-                                  "Please remove the ROLE{} wrapping. Support for the legacy format might be "
-                                  "removed in a future release.",
-                                  DeprecationWarning)
+                    warnings.warn(
+                        f"A role '{role}' is provided using a legacy format. "
+                        "Please remove the ROLE{} wrapping. Support for the legacy format might be "
+                        "removed in a future release.",
+                        DeprecationWarning,
+                    )
                 formatted_roles[catalog] = role
             else:
                 formatted_roles[catalog] = f"ROLE{{{role}}}"
@@ -307,7 +313,7 @@ class TrinoStatus:
 
 class _DelayExponential(object):
     def __init__(
-            self, base=0.1, exponent=2, jitter=True, max_delay=2 * 3600  # 100ms  # 2 hours
+        self, base=0.1, exponent=2, jitter=True, max_delay=2 * 3600  # 100ms  # 2 hours
     ):
         self._base = base
         self._exponent = exponent
@@ -315,7 +321,7 @@ class _DelayExponential(object):
         self._max_delay = max_delay
 
     def __call__(self, attempt):
-        delay = float(self._base) * (self._exponent ** attempt)
+        delay = float(self._base) * (self._exponent**attempt)
         if self._jitter:
             delay *= random.random()
         delay = min(float(self._max_delay), delay)
@@ -324,7 +330,7 @@ class _DelayExponential(object):
 
 class _RetryWithExponentialBackoff(object):
     def __init__(
-            self, base=0.1, exponent=2, jitter=True, max_delay=2 * 3600  # 100ms  # 2 hours
+        self, base=0.1, exponent=2, jitter=True, max_delay=2 * 3600  # 100ms  # 2 hours
     ):
         self._get_delay = _DelayExponential(base, exponent, jitter, max_delay)
 
@@ -390,7 +396,9 @@ class TrinoRequest(object):
         http_scheme: str = None,
         auth: Optional[Any] = constants.DEFAULT_AUTH,
         max_attempts: int = MAX_ATTEMPTS,
-        request_timeout: Union[float, Tuple[float, float]] = constants.DEFAULT_REQUEST_TIMEOUT,
+        request_timeout: Union[
+            float, Tuple[float, float]
+        ] = constants.DEFAULT_REQUEST_TIMEOUT,
         handle_retry=_RetryWithExponentialBackoff(),
         verify: bool = True,
     ) -> None:
@@ -437,56 +445,55 @@ class TrinoRequest(object):
     def http_headers(self) -> Dict[str, str]:
         headers = requests.structures.CaseInsensitiveDict()
 
-        headers[constants.HEADER_CATALOG] = self._client_session.catalog
-        headers[constants.HEADER_SCHEMA] = self._client_session.schema
-        headers[constants.HEADER_SOURCE] = self._client_session.source
-        headers[constants.HEADER_USER] = self._client_session.user
-        headers[constants.HEADER_TIMEZONE] = self._client_session.timezone
-        headers[constants.HEADER_CLIENT_CAPABILITIES] = 'PARAMETRIC_DATETIME'
+        client_session = self._client_session
+        headers[constants.HEADER_CATALOG] = client_session.catalog
+        headers[constants.HEADER_SCHEMA] = client_session.schema
+        headers[constants.HEADER_SOURCE] = client_session.source
+        headers[constants.HEADER_USER] = client_session.user
+        headers[constants.HEADER_TIMEZONE] = client_session.timezone
+        headers[constants.HEADER_CLIENT_CAPABILITIES] = "PARAMETRIC_DATETIME"
         headers["user-agent"] = f"{constants.CLIENT_NAME}/{__version__}"
-        if len(self._client_session.roles.values()):
+
+        roles = client_session.roles
+        if roles:
             headers[constants.HEADER_ROLE] = ",".join(
-                # ``name`` must not contain ``=``
-                "{}={}".format(catalog, urllib.parse.quote(str(role)))
-                for catalog, role in self._client_session.roles.items()
+                f"{catalog}={urllib.parse.quote(str(role))}"
+                for catalog, role in roles.items()
             )
-        if self._client_session.client_tags is not None and len(self._client_session.client_tags) > 0:
-            headers[constants.HEADER_CLIENT_TAGS] = ",".join(self._client_session.client_tags)
+
+        tags = client_session.client_tags
+        if tags:
+            headers[constants.HEADER_CLIENT_TAGS] = ",".join(tags)
 
         headers[constants.HEADER_SESSION] = ",".join(
-            # ``name`` must not contain ``=``
-            "{}={}".format(name, urllib.parse.quote(str(value)))
-            for name, value in self._client_session.properties.items()
+            f"{name}={urllib.parse.quote(str(value))}"
+            for name, value in client_session.properties.items()
         )
 
-        if len(self._client_session.prepared_statements) != 0:
-            # ``name`` must not contain ``=``
+        prepared_statements = client_session.prepared_statements
+        if prepared_statements:
             headers[constants.HEADER_PREPARED_STATEMENT] = ",".join(
-                "{}={}".format(name, urllib.parse.quote_plus(statement))
-                for name, statement in self._client_session.prepared_statements.items()
+                f"{name}={urllib.parse.quote_plus(statement)}"
+                for name, statement in prepared_statements.items()
             )
 
         # merge custom http headers
-        for key in self._client_session.headers:
-            if key in headers.keys():
-                raise ValueError("cannot override reserved HTTP header {}".format(key))
-        headers.update(self._client_session.headers)
+        for key, value in client_session.headers.items():
+            if key in headers:
+                raise ValueError(f"cannot override reserved HTTP header {key}")
+            headers[key] = value
 
-        transaction_id = self._client_session.transaction_id
-        headers[constants.HEADER_TRANSACTION] = transaction_id
+        headers[constants.HEADER_TRANSACTION] = client_session.transaction_id
 
-        if self._client_session.extra_credential is not None and \
-                len(self._client_session.extra_credential) > 0:
-
-            for tup in self._client_session.extra_credential:
+        extra_credentials = client_session.extra_credential
+        if extra_credentials:
+            for tup in extra_credentials:
                 self._verify_extra_credential(tup)
 
-            # HTTP 1.1 section 4.2 combine multiple extra credentials into a
-            # comma-separated value
-            # extra credential value is encoded per spec (application/x-www-form-urlencoded MIME format)
-            headers[constants.HEADER_EXTRA_CREDENTIAL] = \
-                ", ".join(
-                    [f"{tup[0]}={urllib.parse.quote_plus(tup[1])}" for tup in self._client_session.extra_credential])
+            headers[constants.HEADER_EXTRA_CREDENTIAL] = ", ".join(
+                f"{tup[0]}={urllib.parse.quote_plus(tup[1])}"
+                for tup in extra_credentials
+            )
 
         return headers
 
@@ -607,14 +614,18 @@ class TrinoRequest(object):
                 self._client_session.properties[key] = value
 
         if constants.HEADER_SET_CATALOG in http_response.headers:
-            self._client_session.catalog = http_response.headers[constants.HEADER_SET_CATALOG]
+            self._client_session.catalog = http_response.headers[
+                constants.HEADER_SET_CATALOG
+            ]
 
         if constants.HEADER_SET_SCHEMA in http_response.headers:
-            self._client_session.schema = http_response.headers[constants.HEADER_SET_SCHEMA]
+            self._client_session.schema = http_response.headers[
+                constants.HEADER_SET_SCHEMA
+            ]
 
         if constants.HEADER_SET_ROLE in http_response.headers:
             for key, value in get_roles_values(
-                    http_response.headers, constants.HEADER_SET_ROLE
+                http_response.headers, constants.HEADER_SET_ROLE
             ):
                 self._client_session.roles[key] = value
 
@@ -653,12 +664,80 @@ class TrinoRequest(object):
         key = header[0]
 
         if not _HEADER_EXTRA_CREDENTIAL_KEY_REGEX.match(key):
-            raise ValueError(f"whitespace or '=' are disallowed in extra credential '{key}'")
+            raise ValueError(
+                f"whitespace or '=' are disallowed in extra credential '{key}'"
+            )
 
         try:
-            key.encode().decode('ascii')
+            key.encode().decode("ascii")
         except UnicodeDecodeError:
-            raise ValueError(f"only ASCII characters are allowed in extra credential '{key}'")
+            raise ValueError(
+                f"only ASCII characters are allowed in extra credential '{key}'"
+            )
+
+    @property
+    def http_headers(self) -> Dict[str, str]:
+        headers = requests.structures.CaseInsensitiveDict()
+
+        client_session = self._client_session
+        headers[constants.HEADER_CATALOG] = client_session.catalog
+        headers[constants.HEADER_SCHEMA] = client_session.schema
+        headers[constants.HEADER_SOURCE] = client_session.source
+        headers[constants.HEADER_USER] = client_session.user
+        headers[constants.HEADER_TIMEZONE] = client_session.timezone
+        headers[constants.HEADER_CLIENT_CAPABILITIES] = "PARAMETRIC_DATETIME"
+        headers["user-agent"] = f"{constants.CLIENT_NAME}/{__version__}"
+
+        roles = client_session.roles
+        if roles:
+            headers[constants.HEADER_ROLE] = ",".join(
+                f"{catalog}={urllib.parse.quote(str(role))}"
+                for catalog, role in roles.items()
+            )
+
+        tags = client_session.client_tags
+        if tags:
+            headers[constants.HEADER_CLIENT_TAGS] = ",".join(tags)
+
+        headers[constants.HEADER_SESSION] = ",".join(
+            f"{name}={urllib.parse.quote(str(value))}"
+            for name, value in client_session.properties.items()
+        )
+
+        prepared_statements = client_session.prepared_statements
+        if prepared_statements:
+            headers[constants.HEADER_PREPARED_STATEMENT] = ",".join(
+                f"{name}={urllib.parse.quote_plus(statement)}"
+                for name, statement in prepared_statements.items()
+            )
+
+        # merge custom http headers
+        for key, value in client_session.headers.items():
+            if key in headers:
+                raise ValueError(f"cannot override reserved HTTP header {key}")
+            headers[key] = value
+
+        headers[constants.HEADER_TRANSACTION] = client_session.transaction_id
+
+        extra_credentials = client_session.extra_credential
+        if extra_credentials:
+            for tup in extra_credentials:
+                self._verify_extra_credential(tup)
+
+            headers[constants.HEADER_EXTRA_CREDENTIAL] = ", ".join(
+                f"{tup[0]}={urllib.parse.quote_plus(tup[1])}"
+                for tup in extra_credentials
+            )
+
+        return headers
+
+    def get(self, url: str):
+        return self._get(
+            url,
+            headers=self.http_headers,
+            timeout=self._request_timeout,
+            proxies=PROXIES,
+        )
 
 
 class TrinoResult(object):
@@ -703,10 +782,10 @@ class TrinoQuery(object):
     """Represent the execution of a SQL statement by Trino."""
 
     def __init__(
-            self,
-            request: TrinoRequest,
-            query: str,
-            legacy_primitive_types: bool = False,
+        self,
+        request: TrinoRequest,
+        query: str,
+        legacy_primitive_types: bool = False,
     ) -> None:
         self._query_id: Optional[str] = None
         self._stats: Dict[Any, Any] = {}
@@ -779,7 +858,9 @@ class TrinoQuery(object):
         try:
             response = self._request.post(self._query, additional_http_headers)
         except requests.exceptions.RequestException as e:
-            raise trino.exceptions.TrinoConnectionError("failed to execute: {}".format(e))
+            raise trino.exceptions.TrinoConnectionError(
+                "failed to execute: {}".format(e)
+            )
         status = self._request.process(response)
         self._info_uri = status.info_uri
         self._query_id = status.id
@@ -803,8 +884,10 @@ class TrinoQuery(object):
         self._update_count = status.update_count
         self._next_uri = status.next_uri
         if not self._row_mapper and status.columns:
-            self._row_mapper = RowMapperFactory().create(columns=status.columns,
-                                                         legacy_primitive_types=self._legacy_primitive_types)
+            self._row_mapper = RowMapperFactory().create(
+                columns=status.columns,
+                legacy_primitive_types=self._legacy_primitive_types,
+            )
         if status.columns:
             self._columns = status.columns
 
@@ -833,7 +916,9 @@ class TrinoQuery(object):
         try:
             response = self._request.delete(self._next_uri)
         except requests.exceptions.RequestException as e:
-            raise trino.exceptions.TrinoConnectionError("failed to cancel query: {}".format(e))
+            raise trino.exceptions.TrinoConnectionError(
+                "failed to cancel query: {}".format(e)
+            )
         if response.status_code == requests.codes.no_content:
             self._cancelled = True
             logger.debug("query cancelled: %s", self.query_id)
@@ -843,7 +928,10 @@ class TrinoQuery(object):
 
     def is_finished(self) -> bool:
         import warnings
-        warnings.warn("is_finished is deprecated, use finished instead", DeprecationWarning)
+
+        warnings.warn(
+            "is_finished is deprecated, use finished instead", DeprecationWarning
+        )
         return self.finished
 
     @property
